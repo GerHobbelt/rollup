@@ -25,6 +25,29 @@ describe('sanity checks', () => {
 			});
 	});
 
+	it('node API passes warning and default handler to custom onwarn function', () => {
+		let args = [];
+		return rollup
+			.rollup({
+				entry: 'x',
+				plugins: [loader({ x: `console.log( 42 );` })],
+				onwarn (warning, onwarn) {
+					args = [warning, onwarn];
+				}
+			})
+			.then(() => {
+				assert.deepEqual(args[0], {
+					code: 'DEPRECATED_OPTIONS',
+					deprecations: [{
+						new: 'input',
+						old: 'entry',
+					}],
+					message: `The following options have been renamed — please update your config: entry -> input`
+				});
+				assert.equal(typeof args[1], 'function');
+			});
+	});
+
 	it('fails without options.input', () => {
 		return rollup
 			.rollup({})
@@ -36,16 +59,10 @@ describe('sanity checks', () => {
 			});
 	});
 
-	it('fails with invalid keys', () => {
-		return rollup.rollup({ input: 'x', plUgins: [] }).then(
-			() => {
-				throw new Error('Missing expected error');
-			},
-			err => {
-				assert.equal(
-					err.message,
-					"Unexpected key 'plUgins' found, expected one of: acorn, amd, banner, cache, context, entry, exports, extend, external, file, footer, format, freeze, globals, indent, input, interop, intro, legacy, moduleContext, name, noConflict, onwarn, output, outro, paths, plugins, preferConst, pureExternalModules, sourcemap, sourcemapFile, strict, targets, treeshake, watch"
-				);
+	it('does not fail with invalid keys', () => {
+		return rollup.rollup({ input: 'x', plUgins: [], plugins: [loader({ x: `console.log( 42 );` })] }).then(
+			res => {
+				assert.ok(res, 'not throwing up');
 			}
 		);
 	});
@@ -119,9 +136,41 @@ describe('deprecations', () => {
 			assert.equal(result, 42);
 			assert.deepEqual(warnings, [
 				{
-					message: `options.entry is deprecated, use options.input`
+					code: 'DEPRECATED_OPTIONS',
+					deprecations: [{
+						new: 'input',
+						old: 'entry',
+					}],
+					message: `The following options have been renamed — please update your config: entry -> input`
 				}
 			]);
+		});
+	});
+
+	it('adds deprecations correctly for rollup', () => {
+		const warnings = [];
+		return rollup.rollup({
+			entry: 'x',
+			format: 'cjs',
+			indent: true,
+			sourceMap: true,
+			plugins: [loader({ x: `export default 42` })],
+			onwarn: warning => {
+				warnings.push(warning);
+			}
+		}).then(executeBundle).then(result => {
+			assert.equal(result, 42);
+			const deprecations = warnings[0].deprecations;
+			assert.equal(deprecations.length, 4);
+			assert.deepEqual(
+				deprecations,
+				[
+					{ new: "input", old: "entry" },
+					{ new: "output.indent", old: "indent" },
+					{ new: "output.sourcemap", old: "sourceMap" },
+					{ new: "output.format", old: "format" }
+				]
+			);
 		});
 	});
 

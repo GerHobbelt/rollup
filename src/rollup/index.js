@@ -3,106 +3,31 @@ import { basename } from '../utils/path.js';
 import { writeFile } from '../utils/fs.js';
 import { assign, keys } from '../utils/object.js';
 import { mapSequence } from '../utils/promise.js';
-import validateKeys from '../utils/validateKeys.js';
 import error from '../utils/error.js';
 import { SOURCEMAPPING_URL } from '../utils/sourceMappingURL.js';
+import mergeOptions from '../utils/mergeOptions.js';
 import Bundle from '../Bundle.js';
 
 export const VERSION = '<@VERSION@>';
 
-const ALLOWED_KEYS = [
-	'acorn',
-	'amd',
-	'banner',
-	'cache',
-	'context',
-	'entry',
-	'exports',
-	'extend',
-	'external',
-	'file',
-	'footer',
-	'format',
-	'freeze',
-	'globals',
-	'indent',
-	'input',
-	'interop',
-	'intro',
-	'legacy',
-	'moduleContext',
-	'name',
-	'noConflict',
-	'onwarn',
-	'output',
-	'outro',
-	'paths',
-	'plugins',
-	'preferConst',
-	'pureExternalModules',
-	'sourcemap',
-	'sourcemapFile',
-	'strict',
-	'targets',
-	'treeshake',
-	'watch'
-];
-
-function checkAmd ( options ) {
-	if ( options.moduleId ) {
-		if ( options.amd ) throw new Error( 'Cannot have both options.amd and options.moduleId' );
-
-		options.amd = { id: options.moduleId };
-		delete options.moduleId;
-
-		const message = `options.moduleId is deprecated in favour of options.amd = { id: moduleId }`;
-		if ( options.onwarn ) {
-			options.onwarn( { message } );
-		} else {
-			console.warn( message ); // eslint-disable-line no-console
-		}
-	}
+function addDeprecations (deprecations, warn) {
+	const message = `The following options have been renamed — please update your config: ${deprecations.map(
+		option => `${option.old} -> ${option.new}` ).join( ', ' )}`;
+	warn( {
+		code: 'DEPRECATED_OPTIONS',
+		message,
+		deprecations
+	} );
 }
 
-function checkInputOptions ( options, warn ) {
+function checkInputOptions ( options ) {
 	if ( options.transform || options.load || options.resolveId || options.resolveExternal ) {
 		throw new Error(
 			'The `transform`, `load`, `resolveId` and `resolveExternal` options are deprecated in favour of a unified plugin API. See https://github.com/rollup/rollup/wiki/Plugins for details' );
 	}
-
-	if ( options.pureExternalModules ) {
-		if ( options.treeshake === undefined ) {
-			options.treeshake = {};
-		}
-		if ( options.treeshake ) {
-			options.treeshake.pureExternalModules = options.pureExternalModules;
-		}
-		delete options.pureExternalModules;
-		warn( {
-			message: `options.pureExternalModules is deprecated, use options.treeshake.pureExternalModules`
-		} );
-	}
-
-	if ( options.entry && !options.input ) {
-		options.input = options.entry;
-		warn( {
-			message: `options.entry is deprecated, use options.input`
-		} );
-	}
-
-	const err = validateKeys( keys( options ), ALLOWED_KEYS );
-	if ( err ) throw err;
 }
 
-const deprecatedOutputOptions = {
-	dest: 'file',
-	moduleName: 'name',
-	sourceMap: 'sourcemap',
-	sourceMapFile: 'sourcemapFile',
-	useStrict: 'strict'
-};
-
-function checkOutputOptions ( options, warn ) {
+function checkOutputOptions ( options ) {
 	if ( options.format === 'es6' ) {
 		error( {
 			message: 'The `es6` output format is deprecated – use `es` instead',
@@ -119,32 +44,6 @@ function checkOutputOptions ( options, warn ) {
 
 	if ( options.moduleId ) {
 		if ( options.amd ) throw new Error( 'Cannot have both options.amd and options.moduleId' );
-
-		options.amd = { id: options.moduleId };
-		delete options.moduleId;
-
-		warn( {
-			message: `options.moduleId is deprecated in favour of options.amd = { id: moduleId }`
-		} );
-	}
-
-	const deprecations = [];
-	Object.keys( deprecatedOutputOptions ).forEach( old => {
-		if ( old in options ) {
-			deprecations.push( { old, new: deprecatedOutputOptions[ old ] } );
-			options[ deprecatedOutputOptions[ old ] ] = options[ old ];
-			delete options[ old ];
-		}
-	} );
-
-	if ( deprecations.length ) {
-		const message = `The following options have been renamed — please update your config: ${deprecations.map(
-			option => `${option.old} -> ${option.new}` ).join( ', ' )}`;
-		warn( {
-			code: 'DEPRECATED_OPTIONS',
-			message,
-			deprecations
-		} );
 	}
 }
 
@@ -154,15 +53,14 @@ const throwAsyncGenerateError = {
 	}
 };
 
-export default function rollup ( inputOptions ) {
+export default function rollup ( _inputOptions ) {
 	try {
-		if ( !inputOptions ) {
+		if ( !_inputOptions ) {
 			throw new Error( 'You must supply an options object to rollup' );
 		}
-
-		const warn = inputOptions.onwarn || (warning => console.warn( warning.message )); // eslint-disable-line no-console
-
-		checkInputOptions( inputOptions, warn );
+		const { inputOptions, deprecations } = mergeOptions(_inputOptions, {}, { input: true });
+		if ( deprecations.length ) addDeprecations(deprecations, inputOptions.onwarn);
+		checkInputOptions( inputOptions );
 		const bundle = new Bundle( inputOptions );
 
 		timeStart( '--BUILD--' );
@@ -170,12 +68,29 @@ export default function rollup ( inputOptions ) {
 		return bundle.build().then( () => {
 			timeEnd( '--BUILD--' );
 
-			function generate ( outputOptions ) {
-				if ( !outputOptions ) {
+			function generate ( _outputOptions ) {
+				if ( !_outputOptions ) {
 					throw new Error( 'You must supply an options object' );
 				}
-				checkOutputOptions( outputOptions, warn );
-				checkAmd( outputOptions );
+				// since deprecateOptions, adds the output properties
+				// to `inputOptions` so adding that lastly
+				const consolidatedOutputOptions = Object.assign({}, {
+					output: Object.assign({}, _outputOptions, _outputOptions.output, inputOptions.output)
+				});
+				const mergedOptions = mergeOptions(
+					// just for backward compatiblity to fallback on root
+					// if the option isn't present in `output`
+					consolidatedOutputOptions,
+					{},
+					{ output: true }
+				);
+
+				// now outputOptions is an array, but rollup.rollup API doesn't support arrays
+				const outputOptions = mergedOptions.outputOptions[0];
+				const deprecations = mergedOptions.deprecations;
+				
+				if ( deprecations.length ) addDeprecations(deprecations, inputOptions.onwarn);
+				checkOutputOptions( outputOptions );
 
 				timeStart( '--GENERATE--' );
 
